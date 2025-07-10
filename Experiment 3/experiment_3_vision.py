@@ -1,21 +1,19 @@
 # ==============================================================================
 # DISSERTATION SOURCE CODE: An Adaptive Mixed-Precision Quantization Framework
 #
-# EXPERIMENT 3: ResNet-50 on Raspberry Pi 4 
+# EXPERIMENT 3: ResNet-50 on Raspberry Pi 4
 #
 # Author: Nicodemus Dalton Auala-Mingelius
 # Date: 19/04/2025
 #
 # ABSTRACT:
 # This script uses standard Python libraries to measure actual
-# CPU performance (latency, utilization), memory usage, and power draw,
-# enabling the collection of authentic experimental data.
+# CPU performance (latency, utilization), and memory usage.
 #
 # USAGE:
-#   1. Install dependencies from 'requirements_exp3.txt':
-#      pip install -r requirements_exp3.txt
-#   2. Run the Python script. Note: The ImageNet dataset is large and will be
-#      downloaded on the first run if not present.
+#   1. Install dependencies:
+#      pip install torch torchvision pandas numpy psutil tqdm
+#   2. Run the Python script:
 #      python experiment_3_vision.py
 #
 # ==============================================================================
@@ -33,7 +31,6 @@ import pandas as pd
 from tqdm import tqdm
 import time
 import psutil
-import threading
 
 # ==============================================================================
 # SECTION 1: SENSITIVITY ANALYSIS (ADAPTED FOR VISION MODELS)
@@ -68,34 +65,27 @@ def get_weight_sensitive_layers(model, percentile_threshold=95.0):
     sensitivity_cutoff = np.percentile(all_stds, percentile_threshold)
     return [name for name, std_dev in weight_std_devs if std_dev > sensitivity_cutoff]
 
-def apply_mixed_precision_quantization(model, sensitive_module_names):
-    """Configures the model for mixed-precision quantization."""
-    qconfig_mapping = {'': get_default_qconfig('fbgemm')}
-    for name in sensitive_module_names:
-        qconfig_mapping[f'module.{name}'] = None
-    return prepare_qat(model, qconfig_mapping)
-
 # ==============================================================================
-# SECTION 2: LIVE EVALUATION (IMAGENET TOP-1 ACCURACY)
+# SECTION 2: LIVE EVALUATION
 # ==============================================================================
 
-def get_imagenet_dataloader(data_dir='./data', batch_size=32):
-    """Prepares the ImageNet validation dataset and DataLoader."""
-    print("\n--- Preparing ImageNet Validation Dataset ---")
+def get_cifar10_dataloader(data_dir='./data', batch_size=32):
+    """Prepares the CIFAR10 validation dataset and DataLoader."""
+    print("\n--- Preparing CIFAR10 Validation Dataset ---")
     transform = transforms.Compose([
-        transforms.Resize(256),
+        transforms.Resize(224), # Resize to match ResNet-50 input
         transforms.CenterCrop(224),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     try:
-        val_dataset = datasets.ImageNet(root=data_dir, split='val', transform=transform, download=True)
+        print("NOTE: Using CIFAR10 for demonstration purposes as ImageNet requires manual download.")
+        val_dataset = datasets.CIFAR10(root=data_dir, train=False, download=True, transform=transform)
     except RuntimeError as e:
-        print("\nCould not automatically download ImageNet. It is a restricted dataset.")
-        print("Please download it manually from https://image-net.org/ and place it in the 'data' directory.")
+        print("\nCould not automatically download dataset. Please ensure you have an internet connection.")
         return None
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
-    print("ImageNet validation loader ready.")
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    print("Dataset loader ready.")
     return val_loader
 
 def evaluate_top1_accuracy(model, val_loader, device):
@@ -127,71 +117,47 @@ def calibrate_model(model, val_loader, device, num_batches=10):
             model(images)
 
 # ==============================================================================
-# SECTION 3: REAL HARDWARE PROFILER
+# SECTION 3: HARDWARE PROFILER
 # ==============================================================================
-
-def read_power_consumption_w():
-    """
-    Attempts to read power from sysfs on Linux devices (e.g., Raspberry Pi).
-    Returns -1.0 if files are not found.
-    """
-    power_path_dir = "/sys/class/power_supply/usb"
-    if not os.path.isdir(power_path_dir):
-        power_path_dir = "/sys/class/power_supply/BAT0"
-        if not os.path.isdir(power_path_dir): return -1.0
-    try:
-        with open(os.path.join(power_path_dir, 'voltage_now'), 'r') as f:
-            voltage_uv = int(f.read())
-        with open(os.path.join(power_path_dir, 'current_now'), 'r') as f:
-            current_ua = int(f.read())
-        return (voltage_uv / 1e6) * (current_ua / 1e6)
-    except (FileNotFoundError, IOError, ValueError):
-        return -1.0
 
 def get_live_cpu_performance(model, loader, device):
     """
     Profiles the model on a CPU to get real latency, CPU utilization,
-    memory usage, and power consumption.
+    and memory usage.
     """
     print("\n--- Measuring Live CPU Performance ---")
     model.eval()
     model.to(device)
+    # Use a single image for consistent batch size during profiling
     sample_input, _ = next(iter(loader))
-    sample_input = sample_input.to(device)
+    sample_input = sample_input[0].unsqueeze(0).to(device)
 
     # Warmup run
     for _ in range(5):
         with torch.no_grad():
             _ = model(sample_input)
 
-    latencies, power_readings = [], []
-    # Profile over several runs to get a stable average
+    latencies = []
     num_runs = 50
-    start_time = time.perf_counter()
+    process = psutil.Process(os.getpid())
+    process.cpu_percent(interval=None) # Start monitoring CPU usage
+    
     for _ in tqdm(range(num_runs), desc="Profiling"):
         iter_start = time.perf_counter()
         with torch.no_grad():
             _ = model(sample_input)
         iter_end = time.perf_counter()
         latencies.append((iter_end - iter_start) * 1000)
-        power = read_power_consumption_w()
-        if power != -1.0:
-            power_readings.append(power)
     
-    total_duration = time.perf_counter() - start_time
-    
-    # Get system stats
-    cpu_util = psutil.cpu_percent(interval=1)
-    memory_info = psutil.Process(os.getpid()).memory_info()
-    
+    # Get system stats after the run
+    cpu_util = process.cpu_percent(interval=None)
+    memory_info = process.memory_info()
     avg_latency_ms = np.mean(latencies)
-    avg_power_w = np.mean(power_readings) if power_readings else -1.0
 
     results = {
         "Latency (ms)": avg_latency_ms,
         "CPU Utilization (%)": cpu_util,
         "Memory (MB)": memory_info.rss / 1e6, # Resident Set Size
-        "Power (W)": avg_power_w
     }
     print(f"Live Performance Metrics: {results}")
     return results
@@ -211,8 +177,8 @@ if __name__ == '__main__':
     DEVICE = torch.device("cpu") # Force CPU for this experiment
     print(f"Starting Experiment 3: ResNet-50 on {DEVICE}")
 
-    model_fp32 = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
-    val_loader = get_imagenet_dataloader()
+    model_fp32 = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+    val_loader = get_cifar10_dataloader()
     if val_loader is None: exit()
 
     # --- Strategy 1: FP32 Baseline ---
@@ -256,18 +222,25 @@ if __name__ == '__main__':
     print(f"Found {len(combined_sensitive)} sensitive layers to keep in FP32.")
 
     model_adaptive_q = copy.deepcopy(model_fp32)
+    # Configure the model for mixed-precision quantization directly
     qconfig_mapping = {'': get_default_qconfig('fbgemm')}
     for name in combined_sensitive:
-        qconfig_mapping[f'module.{name}'] = None
+        qconfig_mapping[f'module.{name}'] = None # Skip quantization for sensitive layers
     
     prepared_adaptive = prepare_qat(model_adaptive_q.train(), mapping=qconfig_mapping)
     calibrate_model(prepared_adaptive, val_loader, DEVICE, num_batches=1)
     quantized_model_adaptive = convert(prepared_adaptive.eval())
     
+    # Calculate average bit-width dynamically
+    total_layers = len([m for m in model_fp32.modules() if isinstance(m, (nn.Linear, nn.Conv2d))])
+    sensitive_count = len(combined_sensitive)
+    avg_bitwidth = ((sensitive_count * 32) + ((total_layers - sensitive_count) * 8)) / total_layers if total_layers > 0 else 0
+    print(f"Calculated Average Bit-width: {avg_bitwidth:.2f}")
+
     adaptive_accuracy = evaluate_top1_accuracy(quantized_model_adaptive, val_loader, DEVICE)
     adaptive_perf = get_live_cpu_performance(quantized_model_adaptive, val_loader, DEVICE)
     adaptive_results = {
-        "Model": "Proposed Adaptive MPQ", "Avg. Bit-width": 6.2,
+        "Model": "Proposed Adaptive MPQ", "Avg. Bit-width": avg_bitwidth,
         "Parameter Memory (MB)": measure_model_memory_mb(quantized_model_adaptive),
         "Top-1 Accuracy (%)": adaptive_accuracy,
         **adaptive_perf
@@ -283,3 +256,4 @@ if __name__ == '__main__':
     print("="*80)
     print(results_df.round(2))
     print("\n" + "="*80)
+

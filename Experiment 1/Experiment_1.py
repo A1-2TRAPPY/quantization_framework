@@ -14,12 +14,10 @@
 #
 # USAGE:
 #   1. Install dependencies:
-#      pip install torch transformers numpy psutil pandas evaluate datasets lm-eval==0.3.0 holisticai tqdm
-#   2. Compile the C++ hardware profiler:
-#      g++ -o profiler profiler.cpp -std=c++11
-#   3. Run the Python script (requires Hugging Face authentication):
+#      pip install torch transformers numpy psutil pandas evaluate datasets lm-eval==0.3.0 holisticai tqdm pynvml
+#   2. Run the Python script (requires Hugging Face authentication):
 #      huggingface-cli login
-#      python quantization_framework.py
+#      python Experiment_1.py
 #
 # NOTE: The evaluations are resource-intensive and may take a very long time to run.
 # ==============================================================================
@@ -31,13 +29,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import numpy as np
 import copy
 import os
-import subprocess
 import pandas as pd
 import evaluate
 from datasets import load_dataset
 from lm_eval import simple_evaluate
 from holisticai.bias.metrics import stereotype_score, language_model_score, icat_score
 from tqdm import tqdm
+import time
+import pynvml
 
 # ==============================================================================
 # SECTION 1: HELPER FUNCTIONS AND UTILITIES
@@ -50,25 +49,65 @@ def get_model_size_gb(model):
     os.remove('temp.p')
     return size_gb
 
-def get_hardware_feedback_from_cpp(model_name, num_sensitive_layers):
-    """Calls a compiled C++ profiler to get real-time hardware performance metrics."""
-    profiler_path = './profiler'
-    if not os.path.exists(profiler_path):
-        raise FileNotFoundError("C++ profiler executable not found. Please compile profiler.cpp.")
+def get_live_hardware_performance(model, tokenizer, device):
+    """
+    Profiles the model on a GPU to get real latency and power consumption.
+    This function replaces the synthetic C++ profiler.
+    """
+    print("  Measuring live hardware performance...")
+    if not device.startswith("cuda"):
+        print("    Live hardware monitoring is only available for CUDA devices. Skipping.")
+        return {"Latency (ms/pass)": -1.0, "Power (W)": -1.0, "GPU Utilization (%)": -1.0}
 
-    result = subprocess.run(
-        [profiler_path, model_name, str(num_sensitive_layers)],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"Error running profiler: {result.stderr}")
-        return None
     try:
-        metrics = {k.strip(): float(v.strip()) for k, v in (line.split(':') for line in result.stdout.strip().split('\n'))}
-        return metrics
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
     except Exception as e:
-        print(f"Error parsing profiler output: {e}\nOutput was:\n{result.stdout}")
-        return None
+        print(f"    Could not initialize NVML for GPU monitoring: {e}")
+        return {"Latency (ms/pass)": -1.0, "Power (W)": -1.0, "GPU Utilization (%)": -1.0}
+
+    model.eval()
+    model.to(device)
+    
+    # Prepare a sample input for inference
+    prompt = "The theory of relativity is"
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+    # Warmup runs to stabilize GPU state
+    for _ in range(5):
+        with torch.no_grad():
+            _ = model.generate(**inputs, max_new_tokens=10)
+
+    latencies_ms = []
+    power_readings_w = []
+    utilization_readings = []
+    
+    # Profile over several runs to get a stable average
+    num_runs = 20
+    for _ in tqdm(range(num_runs), desc="    Profiling GPU"):
+        start_time = time.perf_counter()
+        with torch.no_grad():
+            _ = model.generate(**inputs, max_new_tokens=10)
+        end_time = time.perf_counter()
+        
+        latencies_ms.append((end_time - start_time) * 1000)
+        power_readings_w.append(pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0) # Convert mW to W
+        utilization_readings.append(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+
+    pynvml.nvmlShutdown()
+
+    avg_latency = np.mean(latencies_ms)
+    avg_power = np.mean(power_readings_w)
+    avg_util = np.mean(utilization_readings)
+
+    metrics = {
+        "Latency (ms/pass)": avg_latency,
+        "Power (W)": avg_power,
+        "GPU Utilization (%)": avg_util
+    }
+    print(f"    Live Performance: {metrics}")
+    return metrics
+
 
 # ==============================================================================
 # SECTION 2: SENSITIVITY ANALYSIS AND QUANTIZATION LOGIC
@@ -113,6 +152,9 @@ def apply_mixed_precision_quantization(model, sensitive_module_names):
     """Configures the model for mixed-precision quantization."""
     qconfig_mapping = {'': get_default_qconfig('fbgemm')}
     for name in sensitive_module_names:
+        # Correctly reference layers within the model structure
+        # The model structure is often nested, e.g., 'model.layers.0.mlp.gate_proj'
+        # PyTorch quantization API expects keys relative to the model passed to `prepare_qat`
         qconfig_mapping[f'module.{name}'] = None
     return prepare_qat(model, qconfig_mapping)
 
@@ -246,19 +288,16 @@ def run_fp16_evaluation(model, tokenizer, device, model_name):
     """Evaluates the FP16 baseline model."""
     print("--- Evaluating Full-Precision (FP16) Model ---")
     
-    num_linear_layers = len([m for m in model.modules() if isinstance(m, nn.Linear)])
-    
-    hw_metrics = get_hardware_feedback_from_cpp(model_name, num_linear_layers)
-    if hw_metrics is None: return None
-    latency_ms = hw_metrics.get('latency_ms', -1.0)
+    hw_metrics = get_live_hardware_performance(model, tokenizer, device)
+    latency_ms = hw_metrics.get('Latency (ms/pass)', -1.0)
     
     results = {
         "Model": "FP16 Baseline",
         "Avg. Bit-width": 16.0,
         "Memory (GB)": get_model_size_gb(model),
-        "Latency (ms/token)": latency_ms,
-        "Throughput (tokens/s)": 1000 / latency_ms if latency_ms > 0 else 0,
+        "Throughput (passes/s)": 1000 / latency_ms if latency_ms > 0 else 0,
     }
+    results.update(hw_metrics)
     results.update(evaluate_accuracy(model_name, tokenizer, device))
     results.update(evaluate_bias(model, tokenizer, device))
     return results
@@ -279,17 +318,16 @@ def run_uniform_int8_evaluation(model, tokenizer, device, calibration_data, mode
     quantized_model.save_pretrained(quantized_model_path)
     tokenizer.save_pretrained(quantized_model_path)
 
-    hw_metrics = get_hardware_feedback_from_cpp(model_name, 0) # 0 sensitive layers
-    if hw_metrics is None: return None
-    latency_ms = hw_metrics.get('latency_ms', -1.0)
+    hw_metrics = get_live_hardware_performance(quantized_model, tokenizer, device)
+    latency_ms = hw_metrics.get('Latency (ms/pass)', -1.0)
 
     results = {
         "Model": "Uniform INT8 PTQ",
         "Avg. Bit-width": 8.0,
         "Memory (GB)": get_model_size_gb(quantized_model),
-        "Latency (ms/token)": latency_ms,
-        "Throughput (tokens/s)": 1000 / latency_ms if latency_ms > 0 else 0,
+        "Throughput (passes/s)": 1000 / latency_ms if latency_ms > 0 else 0,
     }
+    results.update(hw_metrics)
     results.update(evaluate_accuracy(quantized_model_path, tokenizer, device))
     results.update(evaluate_bias(quantized_model, tokenizer, device))
     return results
@@ -322,17 +360,16 @@ def run_adaptive_mpq_evaluation(model, tokenizer, device, calibration_data, mode
     sensitive_count = len(combined_sensitive_layers)
     avg_bitwidth = ((sensitive_count * 16) + ((total_layers - sensitive_count) * 8)) / total_layers if total_layers > 0 else 0
 
-    hw_metrics = get_hardware_feedback_from_cpp(model_name, len(combined_sensitive_layers))
-    if hw_metrics is None: return None
-    latency_ms = hw_metrics.get('latency_ms', -1.0)
+    hw_metrics = get_live_hardware_performance(quantized_model, tokenizer, device)
+    latency_ms = hw_metrics.get('Latency (ms/pass)', -1.0)
     
     results = {
         "Model": "Proposed Adaptive MPQ",
         "Avg. Bit-width": avg_bitwidth,
         "Memory (GB)": get_model_size_gb(quantized_model),
-        "Latency (ms/token)": latency_ms,
-        "Throughput (tokens/s)": 1000 / latency_ms if latency_ms > 0 else 0,
+        "Throughput (passes/s)": 1000 / latency_ms if latency_ms > 0 else 0,
     }
+    results.update(hw_metrics)
     results.update(evaluate_accuracy(quantized_model_path, tokenizer, device))
     results.update(evaluate_bias(quantized_model, tokenizer, device))
     return results
@@ -351,7 +388,7 @@ if __name__ == '__main__':
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(DEVICE)
+        model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=torch.float16).to(DEVICE)
         if tokenizer.pad_token is None:
             tokenizer.add_special_tokens({'pad_token': '[PAD]'})
             model.resize_token_embeddings(len(tokenizer))
@@ -383,7 +420,7 @@ if __name__ == '__main__':
 
     results_df = pd.DataFrame(all_results)
     
-    efficiency_cols = ["Model", "Avg. Bit-width", "Memory (GB)", "Latency (ms/token)", "Throughput (tokens/s)"]
+    efficiency_cols = ["Model", "Avg. Bit-width", "Memory (GB)", "Latency (ms/pass)", "Throughput (passes/s)", "Power (W)", "GPU Utilization (%)"]
     accuracy_cols = ["Model", "MMLU Score (%)", "WikiText-2 PPL"]
     fairness_cols = ["Model", "LMS", "Stereotype Score (SS)", "iCAT Score"]
 
@@ -397,3 +434,4 @@ if __name__ == '__main__':
     print("\n--- Table 3: Fairness and Bias Analysis (StereoSet) ---")
     print(results_df[fairness_cols].round(2))
     print("\n" + "="*80)
+
