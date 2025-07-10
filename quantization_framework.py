@@ -5,35 +5,6 @@
 # Date: 19/04/2025
 #
 # ABSTRACT:
-# This script provides a proof-of-concept implementation for the adaptive 
-# quantization framework proposed in the dissertation, "Constructing an Adaptive 
-# Mixed-Precision Quantization Framework for Edge AI." It demonstrates the core 
-# contributions of the research, including:
-#   1. Multi-faceted sensitivity analysis using both activation and weight statistics.
-#   2. Integration of real-world tooling for hardware performance profiling (via a
-#      C++ wrapper) and bias evaluation (using the 'holistic-bias' toolkit).
-#   3. A Reinforcement Learning (RL) agent that automates the search for an
-#      optimal, mixed-precision quantization policy, balancing the trade-offs
-#      between model efficiency and ethical considerations (fairness).
-#
-# USAGE:
-#   1. Install dependencies:
-#      pip install torch transformers numpy psutil holistic-bias
-#   2. Compile the C++ hardware profiler:
-#      g++ -o profiler profiler.cpp
-#   3. Run the Python script:
-#      python quantization_framework.py
-#
-# ==============================================================================
-
-
-# ==============================================================================
-# DISSERTATION SOURCE CODE: An Adaptive Mixed-Precision Quantization Framework
-#
-# Author: Nicodemus Dalton Auala-Mingelius
-# Date: 19/04/2025
-#
-# ABSTRACT:
 # This script provides the comparative analysis
 # from Experiment 1 (Section 5.1). It evaluates three
 # distinct quantization strategies (FP16, Uniform INT8, and Adaptive MPQ)
