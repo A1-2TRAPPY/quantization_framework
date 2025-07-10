@@ -1,0 +1,39 @@
+Core deep learning and data handling libraries
+
+torch
+pandas
+numpy
+
+
+
+Hugging Face libraries for models and quantization
+
+transformers
+accelerate
+optimum
+auto-gptq
+
+
+
+Libraries for model conversion pipeline
+ONNX and the ONNX-TensorFlow converter
+
+onnx
+tf2onnx
+
+
+
+TensorFlow is required for the TFLite conversion step
+
+tensorflow
+
+
+
+Google's libraries for Edge TPU interaction
+These should be installed via the official Coral.ai setup guides,
+as they are often distributed as .whl files or via a specific apt repository.
+The pip install commands are included for completeness but may not work
+on all platforms without prior setup.
+
+pycoral
+tflite-runtime

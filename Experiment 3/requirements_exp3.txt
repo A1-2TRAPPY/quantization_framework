@@ -1,0 +1,23 @@
+Core deep learning and data handling libraries
+
+torch
+pandas
+numpy
+
+
+
+Torchvision for vision models (ResNet-50) and datasets (ImageNet)
+
+torchvision
+
+
+
+Utility for progress bars during evaluation
+
+tqdm
+
+
+
+Library for accessing live system performance metrics (CPU, Memory)
+
+psutil

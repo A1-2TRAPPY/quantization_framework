@@ -1,12 +1,14 @@
 # ==============================================================================
-# DISSERTATION SOURCE CODE: Experiment 1
+# DISSERTATION SOURCE CODE: An Adaptive Mixed-Precision Quantization Framework
+#
+# EXPERIMENT 1: Quantization Framework
 #
 # Author: Nicodemus Dalton Auala-Mingelius
 # Date: 19/04/2025
 #
 # ABSTRACT:
-# This script provides a production-ready framework for the comparative analysis
-# of quantization strategies. It performs full, real-time evaluations for
+# This script provides a framework for the comparative analysis
+# of quantization strategies. It performs full evaluations for
 # efficiency, accuracy (MMLU and Perplexity), and fairness (StereoSet with
 # robust probability calculations).
 #
@@ -386,7 +388,7 @@ if __name__ == '__main__':
     fairness_cols = ["Model", "LMS", "Stereotype Score (SS)", "iCAT Score"]
 
     print("\n\n" + "="*80)
-    print("REAL-TIME EXPERIMENT: RESULTS SUMMARY")
+    print("EXPERIMENT 1: RESULTS SUMMARY")
     print("="*80)
     print("\n--- Table 1: Performance and Efficiency ---")
     print(results_df[efficiency_cols].round(2))
